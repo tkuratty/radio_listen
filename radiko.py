@@ -3,8 +3,10 @@ import os, sys, argparse, re
 import base64
 import logging
 import xml.etree.ElementTree as ET
+from urllib.error import HTTPError
 
 auth_key = "bcd151073c03b352e1ef2fd66c32209da9ca0afa"
+stations = []
 
 def auth1():
     url = "https://radiko.jp/v2/api/auth1"
@@ -18,11 +20,10 @@ def auth1():
     }
     req = urllib.request.Request(url, None, headers)
     res = urllib.request.urlopen(req)
-    auth_response = {
+    return {
         "body": res.read(),
         "headers": res.info()
     }
-    return auth_response
 
 def get_partial_key(auth_response):
     authtoken = auth_response["headers"]["x-radiko-authtoken"]
@@ -41,8 +42,7 @@ def auth2(partialkey, auth_token):
     }
     req = urllib.request.Request(url, None, headers)
     res = urllib.request.urlopen(req)
-    area = res.read().decode()
-    return area
+    return res.read().decode()
 
 def gen_temp_chunk_m3u8_url(url, auth_token):
     headers = {
@@ -54,17 +54,8 @@ def gen_temp_chunk_m3u8_url(url, auth_token):
     lines = re.findall('^https?://.+m3u8$', body, flags=re.MULTILINE)
     return lines[0]
 
-def get_area_info(auth_token):
-    url = "https://radiko.jp/v2/api/area"
-    headers = {
-        "X-Radiko-AuthToken": auth_token,
-    }
-    req = urllib.request.Request(url, None, headers)
-    res = urllib.request.urlopen(req)
-    area_info = res.read().decode()
-    return area_info
-
 def get_station_info_by_area(area_id):
+    global stations
     url = "http://radiko.jp/v3/station/region/full.xml"
     req = urllib.request.Request(url)
     res = urllib.request.urlopen(req)
@@ -80,16 +71,18 @@ def get_station_info_by_area(area_id):
                 stations.append((station_id, station_name))
     return stations
 
+def get_station_name(station_id):
+    for id, name in stations:
+        if id == station_id:
+            return name
+    return None
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Radiko listener")
     parser.add_argument("station", nargs='?', help="Station ID to listen to")
     parser.add_argument("--area", action="store_true", help="Show station list for the area")
     parser.add_argument("--area_id", help="Area ID to filter stations")
     return parser.parse_args()
-
-def mock_station_list():
-    # Mock function to simulate station list
-    return ["STATION1", "STATION2", "STATION3"]
 
 def main():
     res = auth1()
@@ -100,14 +93,11 @@ def main():
     area_id = area_info.split(',')[0]
 
     args = parse_args()
+    stations = get_station_info_by_area(area_id)
 
     if args.area:
-        if args.area_id:
-            stations = get_station_info_by_area(args.area_id)
-            print("Available stations in area", args.area_id, ":\n", "\n".join([f"{id} ({name})" for id, name in stations]))
-        else:
-            stations = get_station_info_by_area(area_id)
-            print("Available stations in area", area_id, ":\n", "\n".join([f"{id} ({name})" for id, name in stations]))
+        area_to_use = args.area_id if args.area_id else area_id
+        print("Available stations in area", area_to_use, ":\n", "\n".join([f"{id} ({name})" for id, name in stations]))
     else:
         station = args.station
         if not station:
@@ -115,9 +105,21 @@ def main():
             sys.exit(1)
 
         url = f"http://f-radiko.smartstream.ne.jp/{station}/_definst_/simul-stream.stream/playlist.m3u8"
-        m3u8 = gen_temp_chunk_m3u8_url(url, token)
-        print(token)
-        print(m3u8)
+        try:
+            m3u8 = gen_temp_chunk_m3u8_url(url, token)
+        except HTTPError as e:
+            if e.code == 404:
+                print("No radio station found.")
+            else:
+                print(f"Error executing command: {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error executing command: {e}")
+            sys.exit(1)
+
+        station_name = get_station_name(station)
+        print(f"Playing station: {station_name if station_name else station}")
+
         cmd = f"ffplay -nodisp -loglevel quiet -headers 'X-Radiko-Authtoken:{token}' -i '{m3u8}'"
         print(cmd)
         os.system(cmd)
